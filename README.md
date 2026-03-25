@@ -49,3 +49,7 @@ http://192.168.1.50:8000/
   - Raspberry Pi 與觀看裝置在同一網段
   - 防火牆未阻擋該埠號（如 8000）
 - 若要提升速度，可先降低解析度（例如 `--width 640 --height 480`）。
+- 若遇到 `AttributeError: module 'cv2' has no attribute 'data'`，新版程式已加入多路徑自動尋找 Haar Cascade；若仍找不到，可指定：
+  ```bash
+  OPENCV_HAAR_DIR=/usr/share/opencv4/haarcascades python3 face_stream.py
+  ```

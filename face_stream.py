@@ -1,4 +1,5 @@
 import argparse
+import os
 import signal
 import time
 from threading import Condition, Lock, Thread
@@ -7,6 +8,53 @@ import cv2
 from flask import Flask, Response, render_template_string
 from libcamera import Transform, controls
 from picamera2 import Picamera2
+
+
+def load_face_detector():
+    cascade_name = "haarcascade_frontalface_default.xml"
+    candidate_files = []
+
+    # Newer OpenCV builds expose cv2.data.haarcascades
+    cv2_data = getattr(cv2, "data", None)
+    haar_dir = getattr(cv2_data, "haarcascades", None) if cv2_data else None
+    if haar_dir:
+        candidate_files.append(os.path.join(haar_dir, cascade_name))
+
+    # Common Linux / Raspberry Pi OpenCV cascade locations
+    candidate_files.extend(
+        [
+            f"/usr/share/opencv4/haarcascades/{cascade_name}",
+            f"/usr/share/opencv/haarcascades/{cascade_name}",
+            f"/usr/local/share/opencv4/haarcascades/{cascade_name}",
+            f"/usr/local/share/opencv/haarcascades/{cascade_name}",
+        ]
+    )
+
+    # Optional override if environment variable is provided
+    custom_dir = os.environ.get("OPENCV_HAAR_DIR")
+    if custom_dir:
+        candidate_files.append(os.path.join(custom_dir, cascade_name))
+
+    checked = []
+    for cascade_path in candidate_files:
+        if cascade_path in checked:
+            continue
+        checked.append(cascade_path)
+        if not os.path.isfile(cascade_path):
+            continue
+        detector = cv2.CascadeClassifier(cascade_path)
+        if not detector.empty():
+            return detector, cascade_path
+
+    # Last chance: let OpenCV resolve by filename if packaged internally
+    detector = cv2.CascadeClassifier(cascade_name)
+    if not detector.empty():
+        return detector, cascade_name
+
+    raise RuntimeError(
+        "Failed to load Haar cascade for face detection. "
+        f"Checked paths: {checked}"
+    )
 
 
 class FaceDetectionCamera:
@@ -19,11 +67,7 @@ class FaceDetectionCamera:
         self.lock = Lock()
         self.camera_started = False
 
-        self.face_detector = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        if self.face_detector.empty():
-            raise RuntimeError("Failed to load Haar cascade for face detection.")
+        self.face_detector, self.face_cascade_path = load_face_detector()
 
         config = self.picam2.create_video_configuration(
             main={"size": (width, height), "format": "RGB888"},
