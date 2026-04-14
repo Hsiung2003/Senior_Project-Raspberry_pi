@@ -29,6 +29,9 @@ class FaceRecognitionCamera:
         self.face_locations = []
         self.face_names = []
         self.process_this_frame = 0
+        self.recognition_interval = 4
+        self.recognition_scale = 0.25
+        self.jpeg_quality = 70
 
         self.known_face_encodings = []
         self.known_face_names = []
@@ -45,8 +48,12 @@ class FaceRecognitionCamera:
             print(f"Known face image not found: {known_image_path}")
 
         config = self.picam2.create_video_configuration(
-            main={"size": (width, height), "format": "RGB888"},
-            controls={"Sharpness": 1.0},
+            main={"size": (width, height), "format": "BGR888"},
+            controls={
+                "Sharpness": 1.0,
+                # Request a shorter frame duration to keep the stream responsive.
+                "FrameDurationLimits": (33333, 33333),
+            },
         )
         self.picam2.configure(config)
 
@@ -82,11 +89,19 @@ class FaceRecognitionCamera:
                 if not self.running:
                     break
 
-            rgb_frame = self.picam2.capture_array()
+            # Camera frames are captured in BGR for OpenCV display/encoding.
+            bgr_frame = self.picam2.capture_array()
+            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
 
-            if self.process_this_frame % 3 == 0:
-                small_frame = cv2.resize(rgb_frame, (0, 0), fx=0.5, fy=0.5)
-                self.face_locations = face_recognition.face_locations(small_frame)
+            if self.process_this_frame % self.recognition_interval == 0:
+                small_frame = cv2.resize(
+                    rgb_frame,
+                    (0, 0),
+                    fx=self.recognition_scale,
+                    fy=self.recognition_scale,
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                self.face_locations = face_recognition.face_locations(small_frame, model="hog")
                 face_encodings = face_recognition.face_encodings(small_frame, self.face_locations)
 
                 self.face_names = []
@@ -99,24 +114,13 @@ class FaceRecognitionCamera:
                         name = self.known_face_names[matches.index(True)]
                     self.face_names.append(name)
 
-                if not self.face_names:
-                    self.latest_access_message = "No face detected"
-                    self.latest_access_level = "idle"
-                elif all(name == "Winnie" for name in self.face_names):
-                    self.latest_access_message = "Welcome"
-                    self.latest_access_level = "allow"
-                else:
-                    self.latest_access_message = "Denied"
-                    self.latest_access_level = "deny"
-
             self.process_this_frame += 1
-
-            bgr_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
             for (top, right, bottom, left), name in zip(self.face_locations, self.face_names):
-                top *= 2
-                right *= 2
-                bottom *= 2
-                left *= 2
+                scale_restore = int(round(1 / self.recognition_scale))
+                top *= scale_restore
+                right *= scale_restore
+                bottom *= scale_restore
+                left *= scale_restore
 
                 if name == "Winnie":
                     color = (0, 255, 0)
@@ -137,13 +141,25 @@ class FaceRecognitionCamera:
                     2,
                 )
 
-            ok, jpeg = cv2.imencode(".jpg", bgr_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            message, level = self._resolve_access_status(self.face_names)
+            ok, jpeg = cv2.imencode(".jpg", bgr_frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
             if not ok:
                 continue
 
             with self.frame_condition:
                 self.latest_jpeg = jpeg.tobytes()
+                self.latest_access_message = message
+                self.latest_access_level = level
                 self.frame_condition.notify_all()
+
+    @staticmethod
+    def _resolve_access_status(face_names):
+        if not face_names:
+            return "No face detected", "idle"
+        # If any authorized user is currently detected, show Welcome.
+        if any(name == "Winnie" for name in face_names):
+            return "Welcome", "allow"
+        return "Denied", "deny"
 
     def mjpeg_generator(self):
         while True:
@@ -153,7 +169,7 @@ class FaceRecognitionCamera:
 
             with self.frame_condition:
                 if self.latest_jpeg is None:
-                    self.frame_condition.wait(timeout=1.0)
+                    self.frame_condition.wait(timeout=0.2)
                 frame = self.latest_jpeg
 
             if frame is None:
@@ -209,7 +225,7 @@ def create_app(camera: FaceRecognitionCamera):
         <script>
           async function refreshStatus() {
             try {
-              const resp = await fetch("/status");
+              const resp = await fetch("/status", { cache: "no-store" });
               const data = await resp.json();
               const node = document.getElementById("access-status");
               node.textContent = data.message;
@@ -220,7 +236,7 @@ def create_app(camera: FaceRecognitionCamera):
               node.className = "deny";
             }
           }
-          setInterval(refreshStatus, 500);
+          setInterval(refreshStatus, 200);
           refreshStatus();
         </script>
       </body>
@@ -233,19 +249,26 @@ def create_app(camera: FaceRecognitionCamera):
 
     @app.route("/video_stream", methods=["GET"])
     def video_stream():
-        return Response(
+        resp = Response(
             camera.mjpeg_generator(),
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["X-Accel-Buffering"] = "no"
+        return resp
 
     @app.route("/status", methods=["GET"])
     def status():
-        return jsonify(
+        resp = jsonify(
             {
                 "message": camera.latest_access_message,
                 "level": camera.latest_access_level,
             }
         )
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
 
     return app
 
