@@ -1,17 +1,16 @@
 import argparse
 import os
 import signal
+import sys
 from threading import Condition, Lock, Thread
 from unittest.mock import MagicMock
 
 import cv2
-import face_recognition
 from flask import Flask, Response, jsonify, render_template_string
 from picamera2 import Picamera2
 
-import sys
-
 sys.modules["pkg_resources"] = MagicMock()
+import face_recognition
 
 
 class FaceRecognitionCamera:
